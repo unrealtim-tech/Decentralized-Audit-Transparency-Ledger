@@ -52,7 +52,18 @@ pub enum DataKey {
     GlobalMetadataMaxSize,
     /// Signature stored for an event (issue #69): (pubkey, signature).
     EventSignature(BytesN<32>),
-}
+    /// Cached event count per type (issue #52). Updated alongside EventTypeIndices.
+    EventTypeCount(Symbol),
+    /// Optimized storage for event headers (issue #53): (index, timestamp, event_type, submitter).
+    EventMeta(BytesN<32>),
+    /// Optimized storage for event metadata alone (issue #53).
+    EventMetadata(BytesN<32>),
+    /// Event emission configuration (issue #60): 0=full, 1=index-only, 2=hash-only, 3=none.
+    EventEmissionConfig,
+    /// Event emission version (issue #60): 1=full metadata, 2=index-only.
+    EventEmissionVersion,
+    /// Low-cost mode configuration (issue #57): 0=normal, 1=low-cost.
+    LowCostMode,
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -177,25 +188,83 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventOrder(index), &event_id);
-
-        let mut indices: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventTypeIndices(event_type.clone()))
-            .unwrap_or(Vec::new(&env));
-        indices.push_back(event_id.clone());
+        
         env.storage()
             .instance()
-            .set(&DataKey::EventTypeIndices(event_type.clone()), &indices);
+            .set(&DataKey::EventMeta(event_id.clone()), &evt);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
+
+        let mut indices: Vec<BytesN<32>> = if !Self::effective_low_cost_mode(&env) {
+            env.storage()
+                .instance()
+                .get(&DataKey::EventTypeIndices(event_type.clone()))
+                .unwrap_or(Vec::new(&env))
+        } else {
+            Vec::new(&env)
+        };
+        
+        if !Self::effective_low_cost_mode(&env) {
+            indices.push_back(event_id.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::EventTypeIndices(event_type.clone()), &indices);
+            
+            let mut count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventTypeCount(event_type.clone()))
+                .unwrap_or(0);
+            count += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::EventTypeCount(event_type.clone()), &count);
+        }
+        
+        if Self::effective_low_cost_mode(&env) {
+            // In low-cost mode, emit only index to save gas
+            let emission_mode = Self::effective_event_emission_mode(&env);
+            if emission_mode == 1 {
+                env.events().publish(
+                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (index,),
+                );
+            }
+        }
 
         env.storage()
             .instance()
             .set(&DataKey::TotalEvents, &(total + 1));
 
-        env.events().publish(
-            (Symbol::new(&env, "log_event"), event_type, submitter),
-            (index, timestamp, metadata),
-        );
+        let emission_mode = Self::effective_event_emission_mode(&env);
+        match emission_mode {
+            1 => {
+                // Index-only emission (issue #60)
+                env.events().publish(
+                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (index,),
+                );
+            }
+            2 => {
+                // Hash-only emission (issue #60)
+                let metadata_hash = env.crypto().sha256(&metadata);
+                env.events().publish(
+                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (index, metadata_hash),
+                );
+            }
+            3 => {
+                // No emission (issue #60)
+            }
+            _ => {
+                // Default: full metadata emission (backward compatible)
+                env.events().publish(
+                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (index, timestamp, metadata),
+                );
+            }
+        }
 
         event_id
     }
@@ -212,6 +281,26 @@ impl AuditLedger {
         env.storage()
             .instance()
             .get(&DataKey::EventData(id))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            })
+    }
+    
+    /// Retrieve only the event metadata (optimized for low-fee environments, issue #57).
+    pub fn get_event_metadata(env: Env, id: BytesN<32>) -> Bytes {
+        env.storage()
+            .instance()
+            .get(&DataKey::EventMetadata(id))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            })
+    }
+    
+    /// Retrieve only the event header (index, timestamp, event_type, submitter) (issue #53).
+    pub fn get_event_header(env: Env, id: BytesN<32>) -> Event {
+        env.storage()
+            .instance()
+            .get(&DataKey::EventMeta(id))
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::EventDoesNotExist);
             })
@@ -235,10 +324,17 @@ impl AuditLedger {
     }
 
     pub fn event_count(env: Env, event_type: Symbol) -> u32 {
+        if Self::effective_low_cost_mode(&env) {
+            panic_with_error!(&env, ContractError::CapNotSet);
+        }
         Self::event_type_count(&env, event_type)
     }
 
     pub fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event {
+        if Self::effective_low_cost_mode(&env) {
+            panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
+        }
+        
         let indices: Vec<BytesN<32>> = env
             .storage()
             .instance()
@@ -295,7 +391,19 @@ impl AuditLedger {
             .set(&DataKey::EventCapSet(event_type.clone()), &true);
         env.storage()
             .instance()
-            .set(&DataKey::EventMaxLogs(event_type), &new_max);
+            .set(&DataKey::EventMaxLogs(event_type.clone()), &new_max);
+        
+        if !Self::effective_low_cost_mode(&env) {
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::EventTypeCount(event_type.clone()))
+            {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::EventTypeCount(event_type.clone()), &0u32);
+            }
+        }
     }
 
     pub fn remove_event_cap(env: Env, caller: Address, event_type: Symbol) {
@@ -313,7 +421,16 @@ impl AuditLedger {
             .remove(&DataKey::EventCapSet(event_type.clone()));
         env.storage()
             .instance()
-            .remove(&DataKey::EventMaxLogs(event_type));
+            .remove(&DataKey::EventMaxLogs(event_type.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::EventTypeCount(event_type.clone()));
+        
+        if Self::effective_low_cost_mode(&env) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::EventTypeIndices(event_type.clone()));
+        }
     }
 
     pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
@@ -358,6 +475,53 @@ impl AuditLedger {
     pub fn get_metadata_max_size(env: Env, event_type: Symbol) -> u32 {
         Self::effective_metadata_max_size(&env, &event_type)
     }
+    
+    /// Set the event emission mode (owner-only).
+    /// 0 = full metadata emission (default, backward compatible)
+    /// 1 = index-only emission (issue #60)
+    /// 2 = hash-only emission (issue #60)
+    /// 3 = no emission (issue #60)
+    pub fn set_event_emission_mode(env: Env, caller: Address, mode: u32) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventEmissionConfig, &mode);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventEmissionVersion, &2u32);
+    }
+    
+    /// Get the current event emission mode.
+    pub fn get_event_emission_mode(env: Env) -> u32 {
+        Self::effective_event_emission_mode(&env)
+    }
+    
+    /// Enable/disable low-cost mode (owner-only).
+    /// Low-cost mode sacrifices some features (e.g., per-type indexing) for lower per-event cost.
+    /// This is useful for environments with strict fee budgets (issue #57).
+    pub fn set_low_cost_mode(env: Env, caller: Address, enabled: bool) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::LowCostMode, &enabled);
+    }
+    
+    /// Check if low-cost mode is enabled.
+    pub fn is_low_cost_mode(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::LowCostMode)
+            .unwrap_or(false)
+    }
+    
+    fn effective_low_cost_mode(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::LowCostMode)
+            .unwrap_or(false)
+    }
 
     fn effective_metadata_max_size(env: &Env, event_type: &Symbol) -> u32 {
         // per-type overrides global
@@ -377,6 +541,13 @@ impl AuditLedger {
             return v;
         }
         DEFAULT_MAX_METADATA_SIZE
+    }
+    
+    fn effective_event_emission_mode(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EventEmissionConfig)
+            .unwrap_or(1u32) // Default to full metadata emission
     }
 
     // ── issue #69: event signatures (Ed25519) ────────────────────────────────
@@ -425,8 +596,7 @@ impl AuditLedger {
     fn event_type_count(env: &Env, event_type: Symbol) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey::EventTypeIndices(event_type))
-            .map(|v: Vec<BytesN<32>>| v.len())
+            .get(&DataKey::EventTypeCount(event_type))
             .unwrap_or(0)
     }
 

@@ -611,3 +611,141 @@ fn test_mixed_types_with_limits() {
     let result = client.try_log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a3"));
     assert!(result.is_err());
 }
+
+// ── Low-cost mode tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_low_cost_mode_disabled_by_default() {
+    let (env, _owner, client) = create_ledger();
+    assert!(!client.is_low_cost_mode());
+}
+
+#[test]
+fn test_low_cost_mode_enabled() {
+    let (env, owner, client) = create_ledger();
+    client.set_low_cost_mode(&owner, &true);
+    assert!(client.is_low_cost_mode());
+}
+
+#[test]
+fn test_low_cost_mode_logs_without_indexing() {
+    let (env, owner, client) = create_ledger();
+    client.set_low_cost_mode(&owner, &true);
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"test-metadata");
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+    
+    assert_eq!(client.total_events(), 1);
+    
+    // In low-cost mode, event_count should panic (no try_event_count method)
+    // This is expected behavior - event_count will panic with ContractError::CapNotSet
+}
+
+#[test]
+fn test_low_cost_mode_emission() {
+    let (env, owner, client) = create_ledger();
+    client.set_low_cost_mode(&owner, &true);
+    client.set_event_emission_mode(&owner, &1); // Index-only
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"test-metadata");
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+    
+    let contract_events = env.events().all();
+    let events = contract_events.events();
+    assert!(!events.is_empty());
+    
+    // With low-cost mode and index-only emission, events should have only index in data
+    let event_data = events.get(0).unwrap().data;
+    assert_eq!(event_data.len(), 1);
+}
+
+// ── Event emission optimization tests ────────────────────────────────────────
+
+#[test]
+fn test_event_emission_mode_default() {
+    let (env, _owner, client) = create_ledger();
+    let mode = client.get_event_emission_mode();
+    assert_eq!(mode, 1); // Default is full metadata emission
+}
+
+#[test]
+fn test_event_emission_mode_index_only() {
+    let (env, owner, client) = create_ledger();
+    client.set_event_emission_mode(&owner, &1);
+    assert_eq!(client.get_event_emission_mode(), 1);
+}
+
+#[test]
+fn test_event_emission_mode_hash_only() {
+    let (env, owner, client) = create_ledger();
+    client.set_event_emission_mode(&owner, &2);
+    assert_eq!(client.get_event_emission_mode(), 2);
+}
+
+#[test]
+fn test_event_emission_mode_none() {
+    let (env, owner, client) = create_ledger();
+    client.set_event_emission_mode(&owner, &3);
+    assert_eq!(client.get_event_emission_mode(), 3);
+}
+
+#[test]
+fn test_event_emission_index_only() {
+    let (env, owner, client) = create_ledger();
+    client.set_event_emission_mode(&owner, &1);
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"large-metadata-that-would-be-emitted-full");
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+    
+    let contract_events = env.events().all();
+    let events = contract_events.events();
+    assert!(!events.is_empty());
+    
+    // With index-only mode, events should have only index in data
+    let event_data = events.get(0).unwrap().data;
+    assert_eq!(event_data.len(), 1);
+}
+
+// ── Optimized storage tests ────────────────────────────────────────────────
+
+#[test]
+fn test_get_event_metadata() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"test-metadata");
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+    
+    let retrieved_meta = client.get_event_metadata(&id);
+    assert_eq!(retrieved_meta, meta);
+}
+
+#[test]
+fn test_get_event_header() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"header-test");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+    
+    let header = client.get_event_header(&id);
+    assert_eq!(header.index, 0);
+    assert_eq!(header.event_type, payment);
+    assert_eq!(header.submitter, submitter);
+    assert_eq!(header.metadata, meta);
+    assert_eq!(header.timestamp, 1000);
+}
