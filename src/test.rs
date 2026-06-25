@@ -423,6 +423,126 @@ fn test_log_event_returns_correct_fields() {
 }
 
 #[test]
+#[should_panic(expected = "HostError: Error(Contract, #9)")]
+fn test_total_events_before_initialize_panics() {
+    let env = Env::default();
+    let submitter = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.total_events();
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #9)")]
+fn test_log_event_before_initialize_panics() {
+    let env = Env::default();
+    let submitter = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("payment"), &Bytes::from_slice(&env, b"tx1"));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #11)")]
+fn test_log_event_rejects_past_timestamp() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+
+    env.ledger().set_timestamp(999);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #11)")]
+fn test_log_event_rejects_future_timestamp() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+
+    env.ledger().set_timestamp(1000 + super::MAX_TIMESTAMP_DRIFT_SECONDS + 1);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
+}
+
+#[test]
+fn test_log_event_accepts_normal_timestamp_progression() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
+
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #10)")]
+fn test_log_event_rejects_total_events_overflow() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.initialize(&owner, &u32::MAX);
+    env.storage().instance().set(&super::DataKey::TotalEvents, &u32::MAX);
+
+    let submitter = Address::generate(&env);
+    client.log_event(&submitter, &symbol_short!("payment"), &Bytes::from_slice(&env, b"tx1"));
+}
+
+#[test]
+fn test_get_statistics_returns_aggregates() {
+    let (env, _owner, client) = create_ledger();
+    let submitter_a = Address::generate(&env);
+    let submitter_b = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.log_event(&submitter_a, &payment, &Bytes::from_slice(&env, b"t1"));
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter_b, &refund, &Bytes::from_slice(&env, b"t2"));
+    env.ledger().set_timestamp(1002);
+    client.log_event(&submitter_a, &payment, &Bytes::from_slice(&env, b"t3"));
+
+    let stats = client.get_statistics();
+    assert_eq!(stats.total_events, 3);
+    assert_eq!(stats.events_last_hour, 3);
+    assert_eq!(stats.events_last_day, 3);
+    assert_eq!(stats.events_last_week, 3);
+    assert_eq!(stats.events_by_type.len(), 2);
+    assert_eq!(stats.top_submitters.len(), 2);
+}
+
+#[test]
+fn test_get_statistics_empty_ledger() {
+    let (_env, _owner, client) = create_ledger();
+    let stats = client.get_statistics();
+    assert_eq!(stats.total_events, 0);
+    assert_eq!(stats.events_last_hour, 0);
+    assert_eq!(stats.events_by_type.len(), 0);
+}
+
+#[test]
 fn test_set_global_max_equal_to_current_count() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);

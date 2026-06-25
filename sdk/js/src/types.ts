@@ -10,6 +10,15 @@ export interface Event {
   prev_hash: Bytes32;
 }
 
+export interface ContractStatistics {
+  total_events: number;
+  events_by_type: Array<[string, number]>;
+  events_last_hour: number;
+  events_last_day: number;
+  events_last_week: number;
+  top_submitters: Array<[string, number]>;
+}
+
 export enum ContractError {
   CallerNotOwner = 1,
   GlobalMaxLogsReached = 2,
@@ -19,8 +28,12 @@ export enum ContractError {
   NewOwnerIsZero = 6,
   CapNotSet = 7,
   MetadataTooLarge = 8,
-  InvalidSignature = 9,
-  ContractPaused = 10,
+  ContractNotInitialized = 9,
+  TotalEventsOverflow = 10,
+  TimestampOutOfRange = 11,
+  InvalidSignature = 12,
+  ContractPaused = 13,
+  RateLimitExceeded = 14,
 }
 
 export class AuditLedgerError extends Error {
