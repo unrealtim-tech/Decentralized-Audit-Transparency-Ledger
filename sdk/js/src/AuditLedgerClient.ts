@@ -55,6 +55,10 @@ export class AuditLedgerClient {
     return this.transport('get_event_by_type', [type, index]);
   }
 
+  async getStatistics(): Promise<ContractStatistics> {
+    return this.transport('get_statistics', []);
+  }
+
   // Governance helpers (examples)
   async setGlobalMaxLogs(caller: string, newMax: number) {
     return this.transport('set_global_max_logs', [caller, newMax]);
