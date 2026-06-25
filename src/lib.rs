@@ -99,6 +99,8 @@ pub enum ContractError {
     InvalidSignature = 9,
     ContractPaused = 10,
     RateLimitExceeded = 11,
+    NoEventsForType = 14,
+    AlreadyInitialized = 15,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -110,6 +112,9 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
         owner.require_auth();
+        if env.storage().instance().has(&DataKey::Owner) {
+            panic_with_error!(&env, ContractError::AlreadyInitialized);
+        }
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage()
             .instance()
@@ -117,6 +122,197 @@ impl AuditLedger {
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
+    }
+
+    /// Log a batch of events atomically and return their sequential indices.
+    pub fn log_events(env: Env, events: Vec<(Address, Symbol, Bytes)>) -> Vec<u32> {
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+
+        let global_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalMaxLogs)
+            .unwrap();
+        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap();
+        let batch_len: u32 = events.len();
+
+        if total.checked_add(batch_len).is_none() || total + batch_len > global_max {
+            panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut submitter_batch_counts: Vec<(Address, u32)> = Vec::new(&env);
+        let mut type_batch_counts: Vec<(Symbol, u32)> = Vec::new(&env);
+
+        for i in 0..batch_len {
+            let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
+            submitter.require_auth();
+
+            let max_meta = Self::effective_metadata_max_size(&env, &event_type);
+            if metadata.len() > max_meta {
+                panic_with_error!(&env, ContractError::MetadataTooLarge);
+            }
+
+            if let Some(limit) = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::SubmitterRateLimit(submitter.clone()))
+            {
+                let (last_ts, count): (u64, u32) = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::SubmitterRateState(submitter.clone()))
+                    .unwrap_or((0u64, 0u32));
+                let batch_count = Self::increment_address_count(
+                    &env,
+                    &mut submitter_batch_counts,
+                    submitter.clone(),
+                );
+                if now == last_ts {
+                    if count + batch_count > limit {
+                        panic_with_error!(&env, ContractError::RateLimitExceeded);
+                    }
+                } else if batch_count > limit {
+                    panic_with_error!(&env, ContractError::RateLimitExceeded);
+                }
+            }
+
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::EventCapSet(event_type.clone()))
+            {
+                let cap: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::EventMaxLogs(event_type.clone()))
+                    .unwrap();
+                let current_count = Self::event_type_count(&env, event_type.clone());
+                let batch_count = Self::increment_symbol_count(
+                    &env,
+                    &mut type_batch_counts,
+                    event_type.clone(),
+                );
+                if current_count + batch_count > cap {
+                    panic_with_error!(&env, ContractError::EventTypeMaxLogsReached);
+                }
+            }
+        }
+
+        let mut result_indices: Vec<u32> = Vec::new(&env);
+        let mut current_total = total;
+        let mut prev_hash: BytesN<32> = if current_total == 0 {
+            BytesN::from_array(&env, &[0u8; 32])
+        } else {
+            let prev_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(current_total - 1))
+                .unwrap();
+            let prev_evt: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(prev_id))
+                .unwrap();
+            prev_evt.event_hash
+        };
+
+        for i in 0..batch_len {
+            let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
+            let index = current_total;
+            let timestamp = env.ledger().timestamp();
+            let event_id = Self::compute_event_id(
+                &env,
+                &submitter,
+                &event_type,
+                &metadata,
+                timestamp,
+                index,
+            );
+            let event_hash = Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
+
+            let evt = Event {
+                index,
+                timestamp,
+                event_type: event_type.clone(),
+                submitter: submitter.clone(),
+                metadata: metadata.clone(),
+                event_hash: event_hash.clone(),
+                prev_hash: prev_hash.clone(),
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::EventData(event_id.clone()), &evt);
+            env.storage()
+                .instance()
+                .set(&DataKey::EventOrder(index), &event_id);
+
+            let header = EventHeader {
+                index,
+                timestamp,
+                event_type: event_type.clone(),
+                submitter: submitter.clone(),
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
+            env.storage()
+                .instance()
+                .set(&DataKey::EventMeta(event_id.clone()), &evt);
+            env.storage()
+                .instance()
+                .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
+
+            if !Self::effective_low_cost_mode(&env) {
+                Self::push_type_index(&env, event_type.clone(), index);
+                let mut count: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::EventTypeCount(event_type.clone()))
+                    .unwrap_or(0);
+                count += 1;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::EventTypeCount(event_type.clone()), &count);
+            }
+
+            let emission_mode = Self::effective_event_emission_mode(&env);
+            match emission_mode {
+                1 => {
+                    env.events().publish(
+                        (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
+                        (index,),
+                    );
+                }
+                2 => {
+                    let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
+                    env.events().publish(
+                        (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
+                        (index, metadata_hash),
+                    );
+                }
+                3 => {}
+                _ => {
+                    env.events().publish(
+                        (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
+                        (index, timestamp, metadata.clone()),
+                    );
+                }
+            }
+
+            result_indices.push_back(index);
+            prev_hash = event_hash;
+            current_total += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEvents, &current_total);
+
+        result_indices
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
@@ -278,17 +474,6 @@ impl AuditLedger {
                 .instance()
                 .set(&DataKey::EventTypeCount(event_type.clone()), &count);
         }
-        
-        if Self::effective_low_cost_mode(&env) {
-            // In low-cost mode, emit only index to save gas
-            let emission_mode = Self::effective_event_emission_mode(&env);
-            if emission_mode == 1 {
-                env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
-                    (index,),
-                );
-            }
-        }
 
         env.storage()
             .instance()
@@ -389,6 +574,14 @@ impl AuditLedger {
 
     pub fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event {
         if Self::effective_low_cost_mode(&env) {
+            panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
+        }
+
+        let count = Self::event_type_count(&env, event_type.clone());
+        if count == 0 {
+            panic_with_error!(&env, ContractError::NoEventsForType);
+        }
+        if type_index >= count {
             panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
         }
 
@@ -904,6 +1097,40 @@ impl AuditLedger {
                 ((v >> 24) & 0xff) as u8,
             ]
         )
+    }
+
+    fn increment_address_count(
+        env: &Env,
+        counts: &mut Vec<(Address, u32)>,
+        address: Address,
+    ) -> u32 {
+        for i in 0..counts.len() {
+            let (existing_address, existing_count) = counts.get(i).unwrap().clone();
+            if existing_address == address {
+                let new_count = existing_count + 1;
+                counts.set(i, &(existing_address, new_count));
+                return new_count;
+            }
+        }
+        counts.push_back((address.clone(), 1u32));
+        1u32
+    }
+
+    fn increment_symbol_count(
+        env: &Env,
+        counts: &mut Vec<(Symbol, u32)>,
+        event_type: Symbol,
+    ) -> u32 {
+        for i in 0..counts.len() {
+            let (existing_type, existing_count) = counts.get(i).unwrap().clone();
+            if existing_type == event_type {
+                let new_count = existing_count + 1;
+                counts.set(i, &(existing_type, new_count));
+                return new_count;
+            }
+        }
+        counts.push_back((event_type.clone(), 1u32));
+        1u32
     }
 }
 

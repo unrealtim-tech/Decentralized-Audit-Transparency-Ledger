@@ -21,6 +21,9 @@ export enum ContractError {
   MetadataTooLarge = 8,
   InvalidSignature = 9,
   ContractPaused = 10,
+  RateLimitExceeded = 11,
+  NoEventsForType = 14,
+  AlreadyInitialized = 15,
 }
 
 export class AuditLedgerError extends Error {

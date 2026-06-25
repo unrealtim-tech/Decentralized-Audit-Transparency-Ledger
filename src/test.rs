@@ -82,11 +82,95 @@ fn test_get_nonexistent_event_panics() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #5)")]
-fn test_get_event_by_type_out_of_bounds_panics() {
+#[should_panic(expected = "HostError: Error(Contract, #15)")]
+fn test_initialize_reinitialization_panics() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.initialize(&owner, &100);
+    client.initialize(&owner, &200);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #14)")]
+fn test_get_event_by_type_no_events_returns_no_events_for_type() {
     let (_env, _owner, client) = create_ledger();
     let payment = symbol_short!("payment");
     client.get_event_by_type(&payment, &0);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")]
+fn test_get_event_by_type_with_bad_index_panics() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+    client.get_event_by_type(&payment, &1);
+}
+
+#[test]
+fn test_event_count_and_total_events_with_empty_metadata() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::new(&env));
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"non-empty"));
+
+    assert_eq!(client.total_events(), 2);
+    assert_eq!(client.event_count(&payment), 2);
+
+    let evt0 = client.get_event_by_type(&payment, &0);
+    let evt1 = client.get_event_by_type(&payment, &1);
+    assert_eq!(evt0.metadata.len(), 0);
+    assert_eq!(evt1.metadata, Bytes::from_slice(&env, b"non-empty"));
+}
+
+#[test]
+fn test_batch_log_events_logs_each_event_atomically() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let events = soroban_sdk::vec![&env,
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"b")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
+    ];
+
+    let indices = client.log_events(&events);
+    assert_eq!(indices.len(), 3);
+    assert_eq!(client.total_events(), 3);
+    assert_eq!(client.event_count(&payment), 3);
+    assert_eq!(client.get_event_by_type(&payment, &0).metadata, Bytes::from_slice(&env, b"a"));
+    assert_eq!(client.get_event_by_type(&payment, &2).metadata, Bytes::from_slice(&env, b"c"));
+}
+
+#[test]
+fn test_batch_log_events_exceeds_type_cap_reverts() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &payment, &2);
+
+    let events = soroban_sdk::vec![&env,
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"b")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
+    ];
+
+    let result = client.try_log_events(&events);
+    assert!(result.is_err());
 }
 
 // ── issue #70: hash-based IDs ───────────────────────────────────────────────
