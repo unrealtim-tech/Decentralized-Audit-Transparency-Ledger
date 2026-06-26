@@ -342,6 +342,7 @@ impl AuditLedger {
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
+    #[allow(deprecated)]
     pub fn log_event(
         env: Env,
         submitter: Address,
