@@ -224,7 +224,7 @@ impl AuditLedger {
                     &mut type_batch_counts,
                     event_type.clone(),
                 );
-                if current_count + batch_count > cap {
+                if current_count.checked_add(batch_count).is_none() || current_count + batch_count > cap {
                     panic_with_error!(&env, ContractError::EventTypeMaxLogsReached);
                 }
             }
