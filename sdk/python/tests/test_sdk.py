@@ -174,3 +174,61 @@ class TestAuditLedgerClientOffline:
         client.server.invoke_contract = MagicMock(side_effect=Exception("network timeout"))
         with pytest.raises(RPCError):
             client._invoke("total_events")
+
+
+# ── Streaming tests (#127) ────────────────────────────────────────────────────
+
+class TestStreamEvents:
+    """Tests for AuditLedgerClient.stream_events() generator."""
+
+    def _make_streaming_client(self, event_counts):
+        """event_counts: list of totals returned on successive polls."""
+        _stub_stellar_sdk()
+        if "audit_ledger.client" in sys.modules:
+            del sys.modules["audit_ledger.client"]
+        from audit_ledger.client import AuditLedgerClient
+        from audit_ledger.models import Event
+
+        def _make_event(i):
+            return Event(
+                index=i, timestamp=1_700_000_000 + i,
+                event_type="TX", submitter="GABC",
+                metadata=b"", event_hash=bytes(32), prev_hash=bytes(32),
+            )
+
+        client = AuditLedgerClient.__new__(AuditLedgerClient)
+        client.contract_id = "CTEST"
+        client.server = MagicMock()
+        client.source = None
+        client.total_events = MagicMock(side_effect=event_counts)
+        client.get_event_by_order = MagicMock(side_effect=_make_event)
+        return client
+
+    def test_yields_existing_events_in_order(self):
+        client = self._make_streaming_client([3, 3])
+        gen = client.stream_events(after_index=0, poll_interval_s=0)
+        with patch("time.sleep"):
+            events = [next(gen) for _ in range(3)]
+        assert [e.index for e in events] == [0, 1, 2]
+
+    def test_resumes_from_after_index(self):
+        client = self._make_streaming_client([5, 5])
+        gen = client.stream_events(after_index=3, poll_interval_s=0)
+        with patch("time.sleep"):
+            events = [next(gen) for _ in range(2)]
+        assert [e.index for e in events] == [3, 4]
+
+    def test_yields_new_events_as_they_appear(self):
+        client = self._make_streaming_client([2, 4, 4])
+        gen = client.stream_events(after_index=0, poll_interval_s=0)
+        with patch("time.sleep"):
+            events = [next(gen) for _ in range(4)]
+        assert [e.index for e in events] == [0, 1, 2, 3]
+
+    def test_no_events_sleeps(self):
+        client = self._make_streaming_client([0, 0, 1])
+        gen = client.stream_events(after_index=0, poll_interval_s=1.5)
+        with patch("time.sleep") as mock_sleep:
+            next(gen)
+        assert mock_sleep.call_count >= 2
+        mock_sleep.assert_called_with(1.5)
