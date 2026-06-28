@@ -1,131 +1,110 @@
 # Contributing to Decentralized Audit & Transparency Ledger
 
-Thank you for your interest in contributing! This document covers everything you need to get started.
+Thank you for helping improve the Decentralized Audit Transparency Ledger. These guidelines explain how to set up the project, keep contributions consistent, and move changes through review.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating, you agree to uphold it. Report unacceptable behaviour to the maintainers.
-
----
+All contributors are expected to follow the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Be respectful, inclusive, and constructive in issues, pull requests, reviews, and community discussions.
 
 ## Getting Started
 
 ### Prerequisites
 
-| Tool | Install |
-|------|---------|
-| Rust toolchain | [rustup.rs](https://rustup.rs/) |
-| WASM target | `rustup target add wasm32-unknown-unknown` |
-| Soroban CLI | `cargo install soroban-cli --features opt` |
-| Docker & Compose | [docs.docker.com](https://docs.docker.com/get-docker/) |
-| Node.js 20+ | [nodejs.org](https://nodejs.org/) (for UI / metrics exporter) |
+- Rust toolchain, installed with [rustup](https://rustup.rs/)
+- WASM target for contract builds:
+  ```bash
+  rustup target add wasm32-unknown-unknown
+  ```
+- Soroban CLI:
+  ```bash
+  cargo install soroban-cli --features opt
+  ```
+- Optional: Node.js 20+ for the UI and metrics exporter
+- Optional: Docker and Docker Compose for the local stack
 
-### Fork & Clone
+### Fork, Clone, and Set Up
 
-```bash
-# 1. Fork the repository on GitHub, then:
-git clone https://github.com/<your-username>/Decentralized-Audit-Transparency-Ledger.git
-cd Decentralized-Audit-Transparency-Ledger
-
-# 2. Add upstream remote
-git remote add upstream https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger.git
-```
-
-### Build & Test
-
-```bash
-# Build the contract
-cargo build
-
-# Build the optimised WASM binary
-cargo build --target wasm32-unknown-unknown --release
-
-# Run the full test suite
-cargo test
-
-# Run a single test
-cargo test test_log_event
-
-# Format check (must pass before opening a PR)
-cargo fmt --check
-
-# Lint (zero warnings required)
-cargo clippy -- -D warnings
-```
+1. Fork the repository on GitHub.
+2. Clone your fork and enter the project directory:
+   ```bash
+   git clone https://github.com/<your-username>/Decentralized-Audit-Transparency-Ledger.git
+   cd Decentralized-Audit-Transparency-Ledger
+   ```
+3. Add the upstream remote:
+   ```bash
+   git remote add upstream https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger.git
+   ```
+4. Build the project:
+   ```bash
+   cargo build
+   ```
+5. Run the baseline checks before making changes:
+   ```bash
+   cargo fmt --check
+   cargo clippy -- -D warnings
+   cargo test
+   ```
 
 ### Local Docker Stack
 
+To run the metrics exporter, Prometheus, Grafana, and UI locally:
+
 ```bash
-cp .env.example .env          # configure environment variables
-docker compose up --build     # start UI, metrics exporter, Prometheus, Grafana
+docker compose up --build
 ```
 
-- UI: http://localhost:3001
-- Grafana: http://localhost:3000
-- Prometheus: http://localhost:9090
+The UI is available at `http://localhost:3001`, and Grafana is available at `http://localhost:3000`.
 
----
+### Deploying to Testnet
+
+See `scripts/deploy_testnet.sh` and the deployment section in `README.md` for testnet deployment details.
 
 ## Coding Standards
 
-### Rust Formatting
-
-All Rust code **must** be formatted with `cargo fmt`. Run `cargo fmt` before committing; the CI pipeline enforces `cargo fmt --check`.
-
-### Linting
-
-Run `cargo clippy -- -D warnings`. Zero clippy warnings are required. Suppress a specific lint only when strictly necessary and document why with an inline comment.
-
-### Naming Conventions
-
-| Context | Convention |
-|---------|-----------|
-| Types, traits, enums | `PascalCase` |
-| Functions, variables, modules | `snake_case` |
-| Constants | `SCREAMING_SNAKE_CASE` |
-| Contract storage keys | `PascalCase` enum variant (see `DataKey`) |
-
-### Comments & Documentation
-
-- Every `pub` function **must** have a doc comment (`///`) explaining what it does, its parameters, and any errors it can return.
-- Inline comments (`//`) should explain *why*, not *what*.
-- Keep comments up-to-date when you change the code.
-
----
+- Run `cargo fmt` before committing Rust changes. Pull requests should pass `cargo fmt --check`.
+- Run `cargo clippy -- -D warnings`; clippy warnings should be fixed rather than allowed.
+- Follow existing module organization and patterns in `src/`, `services/`, `api/`, and related workspaces.
+- Use clear Rust naming conventions:
+  - `snake_case` for functions, methods, variables, and modules.
+  - `PascalCase` for structs, enums, traits, and type aliases.
+  - `SCREAMING_SNAKE_CASE` for constants and statics.
+- Keep functions focused and prefer explicit error handling over panics in production code.
+- Add doc comments (`///`) for public functions, structs, enums, traits, modules, and non-obvious behavior.
+- Use inline comments sparingly to explain intent, invariants, security assumptions, or complex logic. Avoid comments that simply restate the code.
+- Do not commit generated build artifacts, local secrets, private keys, or environment-specific configuration.
 
 ## Testing Requirements
 
-- All new public functions must have at least one unit test in `src/test.rs`.
-- Edge cases (zero caps, overflow, access control) must be covered.
-- Run `cargo test` before opening a PR — all tests must pass.
-- The project targets **90% test coverage**. Use `cargo tarpaulin` locally to check your contribution does not reduce coverage.
+- Add or update tests for every new function, feature, bug fix, and edge case where behavior changes.
+- Run the full Rust test suite before submitting:
+  ```bash
+  cargo test
+  ```
+- Useful test commands:
+  ```bash
+  cargo test test_log_event
+  cargo test -- --nocapture
+  ```
+- The project targets at least 90% test coverage for new and modified code. If coverage cannot be added for a change, explain why in the pull request.
+- For contract-facing changes, include tests for success paths, authorization or permission failures, validation failures, and boundary conditions.
 
-```bash
-# Install tarpaulin (first time only)
-cargo install cargo-tarpaulin
-
-# Run coverage
-cargo tarpaulin --out Html
-```
-
----
-
-## PR Workflow
+## Pull Request Workflow
 
 ### Branch Naming
 
-```
-feature/<short-description>     # new functionality
-bugfix/<short-description>      # bug fixes
-docs/<short-description>        # documentation only
-refactor/<short-description>    # code restructuring without behaviour change
-test/<short-description>        # test additions or fixes
-```
+Create a branch from the latest upstream default branch. Use one of these prefixes:
 
-### Commit Messages
+- `feature/<short-description>` for new features.
+- `bugfix/<short-description>` for bug fixes.
+- `docs/<short-description>` for documentation-only changes.
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+Example:
 
+```bash
+git fetch upstream
+git checkout master
+git merge upstream/master
+git checkout -b docs/contribution-guidelines
 ```
 feat: add rate-limit enforcement per submitter
 fix: prevent integer overflow in log_events batch
@@ -165,25 +144,46 @@ Before opening your pull request, confirm all of the following:
 
 ### Bounty Points
 
-| Difficulty | Points | Example |
-|------------|--------|---------|
-| High | 200 | Implement global vs. per-event logging limits |
-| Medium | 150 | Write edge-case boundary tests |
-| Trivial | 100 | Standardise metadata structure |
+### Before Opening a PR
 
-Points are tracked per GitHub account and redeemable for rewards as announced by the project maintainers.
+Make sure the following checklist is complete:
 
-### Proposing New Work
+- [ ] The branch is up to date with the upstream default branch.
+- [ ] Code is formatted with `cargo fmt`.
+- [ ] `cargo clippy -- -D warnings` passes with zero warnings.
+- [ ] `cargo test` passes.
+- [ ] New or changed behavior has tests.
+- [ ] Public APIs and non-obvious logic are documented.
+- [ ] The PR description links the related issue or bounty, if applicable.
 
-Submit a proposal issue with:
-- **Problem**: what you want to solve
-- **Approach**: how you plan to solve it
-- **Estimated scope**: lines of code, test count, files affected
+### PR Description Template
 
-Wait for maintainer sign-off before implementing.
+Use a clear pull request description that includes:
 
----
+```markdown
+## Summary
+- What changed?
 
-## Questions
+## Testing
+- What commands did you run?
 
-Open a [GitHub Discussion](../../discussions) or comment on the relevant issue. Please do not use issue comments for general questions unrelated to the issue.
+## Related Issues
+- Closes #<issue-number>
+```
+
+### Review Process
+
+- At least one maintainer approval is required before merge.
+- Address review feedback with additional commits or a small follow-up commit series.
+- Keep discussions constructive and explain trade-offs when accepting or declining suggestions.
+- Maintainers may request additional tests, documentation, or security notes before approving.
+- Prefer squash merging unless maintainers request a different merge strategy.
+
+## Issue Tracking and Bounties
+
+- Search existing issues before opening a new one.
+- Use clear titles and include reproduction steps, expected behavior, actual behavior, logs, and environment details for bugs.
+- To work on an issue, comment that you would like to claim it and wait for maintainer confirmation when the issue requires assignment.
+- For bounty issues, follow the bounty provider's instructions and include the issue number in your branch, commits, and pull request.
+- Bounty points are awarded based on the issue requirements, implementation quality, tests, documentation, review responsiveness, and maintainer acceptance.
+- If you can no longer work on a claimed issue, comment promptly so another contributor can pick it up.
