@@ -108,6 +108,8 @@ pub enum DataKey {
     /// Per-submitter nonce for replay-attack prevention (issue #64).
     /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
     SubmitterNonce(Address),
+    /// Monotonic contract version counter (issue #147) — prevents re-initialization even if owner is cleared.
+    ContractVersion,
 }
 
 #[contracterror]
@@ -199,10 +201,10 @@ pub enum ContractError {
     /// **Resolution**: No action needed; cap is already lifted. Use `set_event_max_logs()` to set a new cap.
     CapAlreadyRemoved = 17,
 
-    /// **Code 18**: Cap was never set for this event type.
-    /// **Common cause**: Internal state inconsistency (rare); attempting to manipulate a cap that was never initialized.
-    /// **Resolution**: Use `set_event_max_logs()` to set a cap first.
-    CapNeverSet = 18,
+    /// **Code 19**: Contract already initialized. Cannot re-initialize a contract that has been initialized (issue #147).
+    /// **Common cause**: `initialize()` called more than once, even after ownership transfer.
+    /// **Resolution**: Deploy a new contract instance; initialization is a one-time operation.
+    AlreadyInitialized = 19,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -214,6 +216,12 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
         owner.require_auth();
+        
+        // Issue #147: Reject re-initialization using monotonic version counter
+        if env.storage().instance().has(&DataKey::ContractVersion) {
+            panic_with_error!(&env, ContractError::AlreadyInitialized);
+        }
+        
         // Support both single-owner (legacy) and multi-owner setups.
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(
@@ -225,6 +233,9 @@ impl AuditLedger {
         );
         // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
+        
+        // Set version to 1 (marks contract as initialized, immutable)
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
     }
 
     /// Log a batch of events atomically and return their sequential indices.

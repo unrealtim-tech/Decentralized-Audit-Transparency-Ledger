@@ -82,7 +82,7 @@ fn test_get_nonexistent_event_panics() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #15)")]
+#[should_panic(expected = "HostError: Error(Contract, #19)")]
 fn test_initialize_reinitialization_panics() {
     let env = Env::default();
     let owner = Address::generate(&env);
@@ -91,7 +91,28 @@ fn test_initialize_reinitialization_panics() {
 
     env.mock_all_auths();
     client.initialize(&owner, &100);
+    // Try to re-initialize — should fail with AlreadyInitialized (error #19)
     client.initialize(&owner, &200);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #19)")]
+fn test_initialize_reinitialization_after_ownership_transfer_panics() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.initialize(&owner, &100);
+    
+    // Transfer ownership
+    client.transfer_ownership(&owner, &new_owner);
+    
+    // Try to re-initialize with new owner — should still fail with AlreadyInitialized
+    // (demonstrates that version counter protects against re-init even if owner changes)
+    client.initialize(&new_owner, &200);
 }
 
 #[test]
