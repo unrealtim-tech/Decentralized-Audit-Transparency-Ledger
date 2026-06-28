@@ -1999,7 +1999,7 @@ impl AuditLedger {
 mod test;
 
 #[cfg(test)]
-mod proptest;
+mod fuzz;
 
 #[cfg(test)]
 mod regression_tests;
