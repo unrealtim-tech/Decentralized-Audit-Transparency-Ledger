@@ -1,4 +1,4 @@
-# Contributing to AuditLedger
+# Contributing to Decentralized Audit & Transparency Ledger
 
 Thank you for helping improve the Decentralized Audit Transparency Ledger. These guidelines explain how to set up the project, keep contributions consistent, and move changes through review.
 
@@ -106,6 +106,43 @@ git checkout master
 git merge upstream/master
 git checkout -b docs/contribution-guidelines
 ```
+feat: add rate-limit enforcement per submitter
+fix: prevent integer overflow in log_events batch
+docs: add deployment guide for mainnet
+test: cover zero global_max_logs edge case
+```
+
+### PR Checklist
+
+Before opening your pull request, confirm all of the following:
+
+- [ ] `cargo fmt --check` passes
+- [ ] `cargo clippy -- -D warnings` passes
+- [ ] `cargo test` passes (all tests green)
+- [ ] New functions have doc comments
+- [ ] New behaviour has test coverage
+- [ ] The PR description explains *what* changed and *why*
+- [ ] No secrets, `.env` files, or generated artefacts are committed
+
+### Review Process
+
+1. Open a pull request against `master` (or the active feature branch).
+2. At least **1 maintainer approval** is required before merging.
+3. Address all review comments; re-request review once resolved.
+4. The maintainer will squash-merge once CI is green and approval is given.
+5. Delete your branch after merging.
+
+---
+
+## Issue Tracking & Bounty Program
+
+### Claiming an Issue
+
+1. Find an open issue labelled `bounty` or `good first issue`.
+2. Comment "I'd like to work on this" — a maintainer will assign it to you.
+3. If you have a new idea, open an issue first and wait for a maintainer to confirm scope before starting work.
+
+### Bounty Points
 
 ### Before Opening a PR
 
