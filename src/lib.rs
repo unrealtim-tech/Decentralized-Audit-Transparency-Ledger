@@ -127,25 +127,95 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
+    /// **Code 1**: Caller does not have owner privileges. Only the current owner can invoke governance functions.
+    /// **Common cause**: Non-owner attempting `set_global_max_logs`, `set_event_max_logs`, `remove_event_cap`, or `transfer_ownership`.
+    /// **Resolution**: Ensure the caller has been authorized as owner or contact the current owner for delegation.
     CallerNotOwner = 1,
+<<<<<<< feature/rbac-control
     CallerRoleTooLow = 19,
     RoleNotSet = 20,
 
+=======
+
+    /// **Code 2**: Global event log capacity reached. Total events equal or exceed `global_max_logs`.
+    /// **Common cause**: Too many events logged; `global_max_logs` cap is too low for demand.
+    /// **Resolution**: Owner should call `set_global_max_logs` with a higher limit, or archive old events off-chain.
+>>>>>>> master
     GlobalMaxLogsReached = 2,
+
+    /// **Code 3**: Per-event-type log capacity reached. Events of this type equal or exceed the type-specific cap.
+    /// **Common cause**: `set_event_max_logs` configured a limit too low for this event type's demand.
+    /// **Resolution**: Owner should increase the cap via `set_event_max_logs`, or call `remove_event_cap` to lift the type-level limit.
     EventTypeMaxLogsReached = 3,
+
+    /// **Code 4**: Event ID does not exist in the ledger.
+    /// **Common cause**: Querying a non-existent event index or using an invalid event hash.
+    /// **Resolution**: Verify the event ID against `total_events()` or enumerate with `get_event_by_type()`.
     EventDoesNotExist = 4,
+
+    /// **Code 5**: Index out of bounds for a per-event-type sub-ledger.
+    /// **Common cause**: `type_index` parameter in `get_event_by_type()` exceeds `event_count(event_type)`.
+    /// **Resolution**: Ensure `type_index < event_count(event_type)`. Start from index 0 and iterate.
     EventTypeIndexOutOfBounds = 5,
+
+    /// **Code 6**: New owner address is zero or invalid.
+    /// **Common cause**: `transfer_ownership()` called with a null/uninitialized address.
+    /// **Resolution**: Provide a valid Stellar account address (e.g., `GXXXXX…`).
     NewOwnerIsZero = 6,
+
+    /// **Code 7**: Event-type cap is not set. Cannot remove a cap that does not exist.
+    /// **Common cause**: `remove_event_cap()` called on an event type that never had a cap configured.
+    /// **Resolution**: Use `set_event_max_logs()` first, then call `remove_event_cap()` to lift it.
     CapNotSet = 7,
+
+    /// **Code 8**: Event metadata exceeds the configured maximum size.
+    /// **Common cause**: Metadata payload larger than `global_metadata_max_size` or event-type specific limit.
+    /// **Resolution**: Reduce metadata size, or owner should increase limit via `set_global_metadata_max_size()` or `set_event_metadata_max_size()`.
     MetadataTooLarge = 8,
+
+    /// **Code 9**: Contract has not been initialized.
+    /// **Common cause**: Attempting to call functions before `initialize(owner, global_max_logs)`.
+    /// **Resolution**: Owner must call `initialize()` once at contract deployment.
     ContractNotInitialized = 9,
+
+    /// **Code 10**: Internal: total events counter would overflow.
+    /// **Common cause**: Architectural limit; extremely high event volume (unlikely in practice).
+    /// **Resolution**: Contact developers; consider archiving or contract migration.
     TotalEventsOverflow = 10,
+
+    /// **Code 11**: Event timestamp is outside acceptable range.
+    /// **Common cause**: Timestamp differs by >3600 seconds from ledger time (possible clock skew or invalid input).
+    /// **Resolution**: Verify system clock is synchronized, or contact submitter to resubmit with correct timestamp.
     TimestampOutOfRange = 11,
+
+    /// **Code 12**: Event signature validation failed.
+    /// **Common cause**: Signature mismatch; event data was tampered with or signed with wrong key.
+    /// **Resolution**: Re-sign the event with the correct private key, or verify the event content has not been modified.
     InvalidSignature = 12,
+
+    /// **Code 13**: Contract is currently paused; write operations are blocked.
+    /// **Common cause**: Owner called `set_paused(true)` to halt event logging (maintenance mode).
+    /// **Resolution**: Contact owner to resume with `set_paused(false)`.
     ContractPaused = 13,
+
+    /// **Code 14**: Submitter has exceeded per-submitter rate limit.
+    /// **Common cause**: Too many events submitted in a single ledger timestamp; rate limit enforced per submitter.
+    /// **Resolution**: Wait for the next ledger or contact owner to increase `set_submitter_rate_limit()`.
     RateLimitExceeded = 14,
+
+    /// **Code 15**: Attempted transfer to the same owner address.
+    /// **Common cause**: `transfer_ownership()` called with current owner address.
+    /// **Resolution**: Provide a different owner address.
     SameOwner = 15,
+
+    /// **Code 16**: New maximum logs is below the current total event count.
+    /// **Common cause**: `set_global_max_logs()` or `set_event_max_logs()` called with a value less than current count.
+    /// **Resolution**: Set the new max to at least the current count, or archive/prune existing events first.
     MaxLogsBelowCurrentCount = 16,
+
+    /// **Code 17**: Cap already removed for this event type.
+    /// **Common cause**: `remove_event_cap()` called twice on the same event type.
+    /// **Resolution**: No action needed; cap is already lifted. Use `set_event_max_logs()` to set a new cap.
     CapAlreadyRemoved = 17,
     CapNeverSet = 18,
     NonceTooLow = 19,
@@ -224,6 +294,9 @@ impl AuditLedger {
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
+        
+        // Set version to 1 (marks contract as initialized, immutable)
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
     }
 
     /// Log a batch of events atomically and return their sequential indices.
