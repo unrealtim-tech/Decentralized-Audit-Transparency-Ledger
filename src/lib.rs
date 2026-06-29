@@ -33,6 +33,11 @@ pub struct Event {
     pub metadata: Bytes,
     /// Optional sub-event type for hierarchical classification
     pub sub_event_type: Option<Symbol>,
+    /// Schema version of this event for forward/backward compatibility.
+    ///
+    /// Contract upgrades may change the interpretation of `metadata` and other fields.
+    /// Consumers should use this version to decide which schema/migration logic to apply.
+    pub version: u32,
     /// SHA-256 of this event (computed over the other fields + prev_hash).
     pub event_hash: BytesN<32>,
     /// SHA-256 of the previous event; `[0u8;32]` for the genesis event.
@@ -67,6 +72,12 @@ pub enum DataKey {
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
+    /// Blocked submitters cannot submit events (issue #141).
+    SubmitterBlocklist(Address),
+    /// If true, allowlist mode is enabled (issue #141).
+    AllowlistMode,
+    /// Per-submitter allowlist state (issue #141).
+    SubmitterAllowlist(Address),
     /// Replaced by Config — kept as tombstone variant.
     TotalEvents,
     /// Replaced by EventCapConfig(Symbol) — kept as tombstone variant.
@@ -406,6 +417,7 @@ impl AuditLedger {
                 submitter: submitter.clone(),
                 metadata: metadata.clone(),
                 sub_event_type: None,
+                version: Self::current_contract_version(&env),
                 event_hash: event_hash.clone(),
                 prev_hash: prev_hash.clone(),
             };
@@ -490,7 +502,7 @@ impl AuditLedger {
         env.storage().instance().set(
             &DataKey::Config,
             &Config {
-                global_max_logs,
+                global_max_logs: global_max,
                 total_events: current_total,
             },
         );
@@ -502,13 +514,19 @@ impl AuditLedger {
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
-    ///
-    /// RBAC implementation depends on this contract compiling; keep backward
-    /// compatibility with the legacy ABI:
-    /// - `log_event(submitter, event_type, metadata)` sets `category=None`
-    ///   and `sub_event_type=None`.
-    /// - The extended ABI uses explicit `category` / `sub_event_type`.
+    #[allow(deprecated)]
+    // Backward-compatible 3-arg API.
     pub fn log_event(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None)
+    }
+
+    // Extended API with optional hierarchy fields.
+    pub fn log_event_with_hierarchy(
         env: Env,
         submitter: Address,
         event_type: Symbol,
@@ -661,6 +679,7 @@ impl AuditLedger {
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -2470,7 +2489,7 @@ impl AuditLedger {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
-                counts.set(idx, &(event_type.clone(), pair.1 + 1));
+                counts.set(idx, (event_type.clone(), pair.1 + 1));
                 return;
             }
         }
