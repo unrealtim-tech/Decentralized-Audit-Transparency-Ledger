@@ -33,6 +33,11 @@ pub struct Event {
     pub metadata: Bytes,
     /// Optional sub-event type for hierarchical classification
     pub sub_event_type: Option<Symbol>,
+    /// Schema version of this event for forward/backward compatibility.
+    ///
+    /// Contract upgrades may change the interpretation of `metadata` and other fields.
+    /// Consumers should use this version to decide which schema/migration logic to apply.
+    pub version: u32,
     /// SHA-256 of this event (computed over the other fields + prev_hash).
     pub event_hash: BytesN<32>,
     /// SHA-256 of the previous event; `[0u8;32]` for the genesis event.
@@ -67,6 +72,12 @@ pub enum DataKey {
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
+    /// Blocked submitters cannot submit events (issue #141).
+    SubmitterBlocklist(Address),
+    /// If true, allowlist mode is enabled (issue #141).
+    AllowlistMode,
+    /// Per-submitter allowlist state (issue #141).
+    SubmitterAllowlist(Address),
     /// Replaced by Config — kept as tombstone variant.
     TotalEvents,
     /// Replaced by EventCapConfig(Symbol) — kept as tombstone variant.
@@ -406,6 +417,7 @@ impl AuditLedger {
                 submitter: submitter.clone(),
                 metadata: metadata.clone(),
                 sub_event_type: None,
+                version: Self::current_contract_version(&env),
                 event_hash: event_hash.clone(),
                 prev_hash: prev_hash.clone(),
             };
@@ -487,9 +499,13 @@ impl AuditLedger {
             current_total += 1;
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Config, &Config { global_max_logs, total_events: current_total });
+        env.storage().instance().set(
+            &DataKey::Config,
+            &Config {
+                global_max_logs: global_max,
+                total_events: current_total,
+            },
+        );
         env.storage()
             .instance()
             .set(&DataKey::TotalEvents, &current_total);
@@ -499,7 +515,18 @@ impl AuditLedger {
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
     #[allow(deprecated)]
+    // Backward-compatible 3-arg API.
     pub fn log_event(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None)
+    }
+
+    // Extended API with optional hierarchy fields.
+    pub fn log_event_with_hierarchy(
         env: Env,
         submitter: Address,
         event_type: Symbol,
@@ -517,17 +544,34 @@ impl AuditLedger {
 
         // --- issue #141: enforce submitter blocklist/allowlist ---
         // Check if submitter is blocked
-        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::SubmitterBlocklist(submitter.clone())) {
+        if let Some(true) = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::SubmitterBlocklist(submitter.clone()))
+        {
             panic_with_error!(&env, ContractError::SubmitterBlocked);
         }
 
         // Check allowlist mode
-        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::AllowlistMode) {
-            if let Some(false) = env.storage().instance().get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone())) {
+        if let Some(true) = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::AllowlistMode)
+        {
+            if let Some(false) = env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone()))
+            {
                 panic_with_error!(&env, ContractError::SubmitterBlocked);
             }
             // If allowlist key doesn't exist, reject by default
-            if env.storage().instance().get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone())).is_none() {
+            if env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone()))
+                .is_none()
+            {
                 panic_with_error!(&env, ContractError::SubmitterBlocked);
             }
         }
@@ -635,6 +679,7 @@ impl AuditLedger {
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -774,7 +819,14 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NonceTooLow);
         }
 
-        let event_id = Self::log_event(env.clone(), submitter.clone(), event_type, metadata, None, None);
+        let event_id = Self::log_event(
+            env.clone(),
+            submitter.clone(),
+            event_type,
+            metadata,
+            None,
+            None,
+        );
 
         env.storage()
             .instance()
@@ -891,7 +943,12 @@ impl AuditLedger {
     }
 
     /// List event headers for a given category with simple pagination.
-    pub fn list_events_by_category(env: Env, category: Symbol, start: u32, limit: u32) -> Vec<EventHeader> {
+    pub fn list_events_by_category(
+        env: Env,
+        category: Symbol,
+        start: u32,
+        limit: u32,
+    ) -> Vec<EventHeader> {
         let total = Self::total_events(env.clone());
         let mut out: Vec<EventHeader> = Vec::new(&env);
         if start >= total {
@@ -931,7 +988,11 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         let total = Self::total_events(env.clone());
-        let mut archived: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
+        let mut archived: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchivedTotalEvents)
+            .unwrap_or(0u32);
         let mut moved: u32 = 0;
         for i in 0..total {
             let id: BytesN<32> = env
@@ -1123,16 +1184,20 @@ impl AuditLedger {
         // Note: callers should ensure the new WASM is compatible with storage layout.
         // Try to obtain current wasm hash if available (best-effort).
         let old_hash_opt: Option<BytesN<32>> = None;
-        env.events().publish((Symbol::new(&env, "contract_upgraded"),), (old_hash_opt, new_wasm_hash.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "contract_upgraded"),),
+            (old_hash_opt, new_wasm_hash.clone()),
+        );
         #[cfg(test)]
         {
             return;
         }
         #[cfg(not(test))]
         {
-        // Perform upgrade via deployer API (Soroban deployer helper).
-        // This is a best-effort call and may vary by runtime.
-        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+            // Perform upgrade via deployer API (Soroban deployer helper).
+            // This is a best-effort call and may vary by runtime.
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
         }
     }
 
@@ -1751,7 +1816,9 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage().instance().set(&DataKey::AllowlistMode, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistMode, &false);
         env.events()
             .publish((Symbol::new(&env, "allowlist_disabled"),), (caller,));
     }
@@ -1765,8 +1832,10 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::SubmitterAllowlist(submitter.clone()), &true);
-        env.events()
-            .publish((Symbol::new(&env, "submitter_allowed"),), (submitter, caller));
+        env.events().publish(
+            (Symbol::new(&env, "submitter_allowed"),),
+            (submitter, caller),
+        );
     }
 
     /// Remove a submitter from the allowlist (owner-only). Issue #141: governance.
@@ -2420,7 +2489,7 @@ impl AuditLedger {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
-                counts.set(idx, &(event_type.clone(), pair.1 + 1));
+                counts.set(idx, (event_type.clone(), pair.1 + 1));
                 return;
             }
         }
