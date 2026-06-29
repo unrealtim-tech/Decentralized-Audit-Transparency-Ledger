@@ -33,6 +33,11 @@ pub struct Event {
     pub metadata: Bytes,
     /// Optional sub-event type for hierarchical classification
     pub sub_event_type: Option<Symbol>,
+    /// Schema version of this event for forward/backward compatibility.
+    ///
+    /// Contract upgrades may change the interpretation of `metadata` and other fields.
+    /// Consumers should use this version to decide which schema/migration logic to apply.
+    pub version: u32,
     /// SHA-256 of this event (computed over the other fields + prev_hash).
     pub event_hash: BytesN<32>,
     /// SHA-256 of the previous event; `[0u8;32]` for the genesis event.
@@ -67,6 +72,12 @@ pub enum DataKey {
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
+    /// Blocked submitters cannot submit events (issue #141).
+    SubmitterBlocklist(Address),
+    /// If true, allowlist mode is enabled (issue #141).
+    AllowlistMode,
+    /// Per-submitter allowlist state (issue #141).
+    SubmitterAllowlist(Address),
     /// Replaced by Config — kept as tombstone variant.
     TotalEvents,
     /// Replaced by EventCapConfig(Symbol) — kept as tombstone variant.
@@ -121,34 +132,111 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
+    /// TTL configuration (#121): number of ledgers after which persistent events are eligible for expiry.
+    /// Absent = TTL disabled (instance storage, no expiry).
+    EventTtl,
+    /// Submitter blocklist (#141): Address → bool.
+    SubmitterBlocklist(Address),
+    /// Allowlist mode flag (#141).
+    AllowlistMode,
+    /// Submitter allowlist (#141): Address → bool.
+    SubmitterAllowlist(Address),
 }
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
+    /// **Code 1**: Caller does not have owner privileges. Only the current owner can invoke governance functions.
+    /// **Common cause**: Non-owner attempting `set_global_max_logs`, `set_event_max_logs`, `remove_event_cap`, or `transfer_ownership`.
+    /// **Resolution**: Ensure the caller has been authorized as owner or contact the current owner for delegation.
     CallerNotOwner = 1,
+
+    /// **Code 2**: Global event log capacity reached. Total events equal or exceed `global_max_logs`.
+    /// **Common cause**: Too many events logged; `global_max_logs` cap is too low for demand.
+    /// **Resolution**: Owner should call `set_global_max_logs` with a higher limit, or archive old events off-chain.
     GlobalMaxLogsReached = 2,
+
+    /// **Code 3**: Per-event-type log capacity reached. Events of this type equal or exceed the type-specific cap.
+    /// **Common cause**: `set_event_max_logs` configured a limit too low for this event type's demand.
+    /// **Resolution**: Owner should increase the cap via `set_event_max_logs`, or call `remove_event_cap` to lift the type-level limit.
     EventTypeMaxLogsReached = 3,
+
+    /// **Code 4**: Event ID does not exist in the ledger.
+    /// **Common cause**: Querying a non-existent event index or using an invalid event hash.
+    /// **Resolution**: Verify the event ID against `total_events()` or enumerate with `get_event_by_type()`.
     EventDoesNotExist = 4,
+
+    /// **Code 5**: Index out of bounds for a per-event-type sub-ledger.
+    /// **Common cause**: `type_index` parameter in `get_event_by_type()` exceeds `event_count(event_type)`.
+    /// **Resolution**: Ensure `type_index < event_count(event_type)`. Start from index 0 and iterate.
     EventTypeIndexOutOfBounds = 5,
+
+    /// **Code 6**: New owner address is zero or invalid.
+    /// **Common cause**: `transfer_ownership()` called with a null/uninitialized address.
+    /// **Resolution**: Provide a valid Stellar account address (e.g., `GXXXXX…`).
     NewOwnerIsZero = 6,
+
+    /// **Code 7**: Event-type cap is not set. Cannot remove a cap that does not exist.
+    /// **Common cause**: `remove_event_cap()` called on an event type that never had a cap configured.
+    /// **Resolution**: Use `set_event_max_logs()` first, then call `remove_event_cap()` to lift it.
     CapNotSet = 7,
+
+    /// **Code 8**: Event metadata exceeds the configured maximum size.
+    /// **Common cause**: Metadata payload larger than `global_metadata_max_size` or event-type specific limit.
+    /// **Resolution**: Reduce metadata size, or owner should increase limit via `set_global_metadata_max_size()` or `set_event_metadata_max_size()`.
     MetadataTooLarge = 8,
+
+    /// **Code 9**: Contract has not been initialized.
+    /// **Common cause**: Attempting to call functions before `initialize(owner, global_max_logs)`.
+    /// **Resolution**: Owner must call `initialize()` once at contract deployment.
     ContractNotInitialized = 9,
+
+    /// **Code 10**: Internal: total events counter would overflow.
+    /// **Common cause**: Architectural limit; extremely high event volume (unlikely in practice).
+    /// **Resolution**: Contact developers; consider archiving or contract migration.
     TotalEventsOverflow = 10,
+
+    /// **Code 11**: Event timestamp is outside acceptable range.
+    /// **Common cause**: Timestamp differs by >3600 seconds from ledger time (possible clock skew or invalid input).
+    /// **Resolution**: Verify system clock is synchronized, or contact submitter to resubmit with correct timestamp.
     TimestampOutOfRange = 11,
+
+    /// **Code 12**: Event signature validation failed.
+    /// **Common cause**: Signature mismatch; event data was tampered with or signed with wrong key.
+    /// **Resolution**: Re-sign the event with the correct private key, or verify the event content has not been modified.
     InvalidSignature = 12,
+
+    /// **Code 13**: Contract is currently paused; write operations are blocked.
+    /// **Common cause**: Owner called `set_paused(true)` to halt event logging (maintenance mode).
+    /// **Resolution**: Contact owner to resume with `set_paused(false)`.
     ContractPaused = 13,
+
+    /// **Code 14**: Submitter has exceeded per-submitter rate limit.
+    /// **Common cause**: Too many events submitted in a single ledger timestamp; rate limit enforced per submitter.
+    /// **Resolution**: Wait for the next ledger or contact owner to increase `set_submitter_rate_limit()`.
     RateLimitExceeded = 14,
+
+    /// **Code 15**: Attempted transfer to the same owner address.
+    /// **Common cause**: `transfer_ownership()` called with current owner address.
+    /// **Resolution**: Provide a different owner address.
     SameOwner = 15,
+
+    /// **Code 16**: New maximum logs is below the current total event count.
+    /// **Common cause**: `set_global_max_logs()` or `set_event_max_logs()` called with a value less than current count.
+    /// **Resolution**: Set the new max to at least the current count, or archive/prune existing events first.
     MaxLogsBelowCurrentCount = 16,
+
+    /// **Code 17**: Cap already removed for this event type.
+    /// **Common cause**: `remove_event_cap()` called twice on the same event type.
+    /// **Resolution**: No action needed; cap is already lifted. Use `set_event_max_logs()` to set a new cap.
     CapAlreadyRemoved = 17,
     CapNeverSet = 18,
     NonceTooLow = 19,
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
+    SubmitterBlocked = 23,
 }
 
 #[contracttype]
@@ -221,6 +309,9 @@ impl AuditLedger {
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
+        
+        // Set version to 1 (marks contract as initialized, immutable)
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
     }
 
     /// Log a batch of events atomically and return their sequential indices.
@@ -326,6 +417,7 @@ impl AuditLedger {
                 submitter: submitter.clone(),
                 metadata: metadata.clone(),
                 sub_event_type: None,
+                version: Self::current_contract_version(&env),
                 event_hash: event_hash.clone(),
                 prev_hash: prev_hash.clone(),
             };
@@ -410,7 +502,7 @@ impl AuditLedger {
         env.storage().instance().set(
             &DataKey::Config,
             &Config {
-                global_max_logs,
+                global_max_logs: global_max,
                 total_events: current_total,
             },
         );
@@ -423,7 +515,18 @@ impl AuditLedger {
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
     #[allow(deprecated)]
+    // Backward-compatible 3-arg API.
     pub fn log_event(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None)
+    }
+
+    // Extended API with optional hierarchy fields.
+    pub fn log_event_with_hierarchy(
         env: Env,
         submitter: Address,
         event_type: Symbol,
@@ -576,6 +679,7 @@ impl AuditLedger {
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -601,6 +705,21 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
+
+        // --- issue #121: write to persistent storage when TTL is configured ---
+        let ttl: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTtl)
+            .unwrap_or(0);
+        if ttl > 0 {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EventData(event_id.clone()), &evt);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::EventData(event_id.clone()), ttl, ttl);
+        }
 
         // Task 4: cache low_cost_mode to avoid double read.
         let low_cost = Self::effective_low_cost_mode(&env);
@@ -1456,11 +1575,14 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
         }
         let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let old_max = cfg.global_max_logs;
         cfg.global_max_logs = new_max;
         env.storage().instance().set(&DataKey::Config, &cfg);
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMaxLogs, &new_max);
+        env.storage().instance().set(&DataKey::GlobalMaxLogs, &new_max);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_global_max")),
+            (caller, old_max, new_max),
+        );
     }
 
     pub fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32) {
@@ -1526,7 +1648,11 @@ impl AuditLedger {
             .remove(&DataKey::EventMaxLogs(event_type.clone()));
         env.storage()
             .instance()
-            .set(&DataKey::EventCapRemoved(event_type), &true);
+            .set(&DataKey::EventCapRemoved(event_type.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "remove_event_cap")),
+            (caller, event_type),
+        );
     }
 
     pub fn has_cap(env: Env, event_type: Symbol) -> bool {
@@ -1551,6 +1677,10 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::SameOwner);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "transfer_ownership")),
+            (caller, current_owner, new_owner),
+        );
     }
 
     // ── issue #67: metadata size governance ──────────────────────────────────
@@ -1587,6 +1717,38 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
+    }
+
+    /// Set the TTL for events written to persistent storage (#121).
+    ///
+    /// When `ttl_ledgers > 0`, subsequent `log_event` calls store each event in
+    /// `env.storage().persistent()` and extend its TTL to `ttl_ledgers` ledgers
+    /// from the current ledger sequence.  When `ttl_ledgers == 0`, TTL is
+    /// disabled and events continue to be stored in instance storage (no expiry).
+    ///
+    /// **Cost tradeoffs** — see docs/fees.md#ttl-storage.
+    pub fn set_event_ttl(env: Env, caller: Address, ttl_ledgers: u32) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        let old_ttl: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTtl)
+            .unwrap_or(0);
+        env.storage().instance().set(&DataKey::EventTtl, &ttl_ledgers);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_event_ttl")),
+            (caller, old_ttl, ttl_ledgers),
+        );
+    }
+
+    /// Return the currently configured TTL in ledgers, or 0 if disabled.
+    pub fn get_event_ttl(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0)
     }
 
     /// Pause write operations. Owner-only. Works even if contract already paused.
@@ -2327,7 +2489,7 @@ impl AuditLedger {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
-                counts.set(idx, &(event_type.clone(), pair.1 + 1));
+                counts.set(idx, (event_type.clone(), pair.1 + 1));
                 return;
             }
         }
